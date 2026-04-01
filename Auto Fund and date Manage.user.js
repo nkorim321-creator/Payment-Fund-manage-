@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         N*M*S*H*N MTurk Payment Cycle Manager (Secure Column A)
+// @name         N*M*S*H*N MTurk Payment Cycle Manager
 // @namespace    N*M*S*H*N
-// @version      11.0
-// @description  MTurk payment cycle manager with Worker ID Security (Column A only), Screen Lock, 1$-10$ Limits
+// @version      9.5
+// @description  MTurk payment cycle manager with workflow-based daily trigger limit, case-3 bounce logic, boundary reruns, homepage redirect recovery, generalized low-earnings logic, and forced 3-day near-boundary rule (1$-10$ Limits)
 // @match        https://worker.mturk.com/*
 // @grant        none
 // @run-at       document-idle
@@ -10,13 +10,6 @@
 
 (function () {
   'use strict';
-
-  // --- SECURITY CONFIG ---
-  const SECURITY_CONFIG = {
-    // আপনার নতুন Google Sheet লিংক (export?format=csv সহ)
-    sheetCsvUrl: 'https://docs.google.com/spreadsheets/d/1p03KacnfGQhtXm7umEnbktki3wCpaVzC_16W51iKn6U/export?format=csv',
-    lockMessage: 'Your Worker ID is not authorized to use this script.'
-  };
 
   const CONFIG = {
     debug: true,
@@ -55,54 +48,6 @@
     R7_DO_NOTHING_C_HIGH_LATE: 'R7_DO_NOTHING_C_HIGH_LATE'
   };
 
-  // --- SECURITY FUNCTIONS ---
-
-  async function getAuthorizedIds() {
-    try {
-      const response = await fetch(SECURITY_CONFIG.sheetCsvUrl);
-      if (!response.ok) throw new Error('Sheet access failed');
-      const csvData = await response.text();
-      // শুধুমাত্র Column A থেকে ডাটা নেওয়ার লজিক
-      return csvData.split(/\r?\n/)
-        .map(row => row.split(',')[0].trim().toUpperCase())
-        .filter(id => id.length > 5); // ছোট টেক্সট বা খালি ঘর বাদ দেওয়ার জন্য
-    } catch (err) {
-      console.error('[N*M*S*H*N] Security Fetch Error:', err);
-      return [];
-    }
-  }
-
-  function getMyWorkerId() {
-    // MTurk পেজ থেকে ইউজারের Worker ID বের করা
-    const selectors = ['.worker-id-value', '[data-worker-id]', '.p-r-xs'];
-    for (let s of selectors) {
-      const el = document.querySelector(s);
-      if (el) {
-        let val = el.textContent || el.getAttribute('data-worker-id');
-        val = val.replace('ID:', '').trim().toUpperCase();
-        if (val.length > 5) return val;
-      }
-    }
-    return null;
-  }
-
-  function showLockScreen() {
-    // স্ক্রিন লক করে দেওয়ার ডিজাইন
-    document.documentElement.innerHTML = `
-      <div style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:#0d1117;color:#ff4b4b;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:2147483647;font-family:sans-serif;text-align:center;">
-        <div style="font-size:80px;margin-bottom:20px;">🔒</div>
-        <h1 style="font-size:32px;margin-bottom:10px;">ACCESS DENIED</h1>
-        <p style="font-size:18px;color:#8b949e;max-width:80%;">${SECURITY_CONFIG.lockMessage}</p>
-        <div style="margin-top:30px;padding:15px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#c9d1d9;">
-          Contact admin N*M*S*H*N to authorize your ID.
-        </div>
-      </div>
-    `;
-    window.stop();
-  }
-
-  // --- CORE FUNCTIONS ---
-
   function log(...args) {
     if (CONFIG.debug) console.log('[N*M*S*H*N]', ...args);
   }
@@ -135,32 +80,76 @@
       });
       document.body.appendChild(el);
     }
+
     el.style.background = color;
     el.textContent = message;
     log(message);
   }
 
-  function saveJSON(key, obj) { localStorage.setItem(key, JSON.stringify(obj)); }
-  function loadJSON(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
-  function removeKey(key) { localStorage.removeItem(key); }
-  function saveState(obj) { saveJSON(CONFIG.stateKey, obj); }
-  function loadState() { return loadJSON(CONFIG.stateKey); }
-  function clearState() { removeKey(CONFIG.stateKey); }
-  function saveWorkflow(obj) { saveJSON(CONFIG.workflowKey, obj); }
-  function loadWorkflow() { return loadJSON(CONFIG.workflowKey); }
-  function clearWorkflow() { removeKey(CONFIG.workflowKey); }
-  function saveSlabMemory(obj) { saveJSON(CONFIG.slabMemoryKey, obj); }
-  function loadSlabMemory() { return loadJSON(CONFIG.slabMemoryKey); }
+  function saveJSON(key, obj) {
+    localStorage.setItem(key, JSON.stringify(obj));
+    log('saveJSON', key, obj);
+  }
+
+  function loadJSON(key) {
+    try {
+      return JSON.parse(localStorage.getItem(key) || 'null');
+    } catch {
+      return null;
+    }
+  }
+
+  function removeKey(key) {
+    localStorage.removeItem(key);
+    log('removeKey', key);
+  }
+
+  function saveState(obj) {
+    saveJSON(CONFIG.stateKey, obj);
+  }
+
+  function loadState() {
+    return loadJSON(CONFIG.stateKey);
+  }
+
+  function clearState() {
+    removeKey(CONFIG.stateKey);
+  }
+
+  function saveWorkflow(obj) {
+    saveJSON(CONFIG.workflowKey, obj);
+  }
+
+  function loadWorkflow() {
+    return loadJSON(CONFIG.workflowKey);
+  }
+
+  function clearWorkflow() {
+    removeKey(CONFIG.workflowKey);
+  }
+
+  function saveSlabMemory(obj) {
+    saveJSON(CONFIG.slabMemoryKey, obj);
+  }
+
+  function loadSlabMemory() {
+    return loadJSON(CONFIG.slabMemoryKey);
+  }
 
   function getPDTDate() {
     const now = new Date();
-    const pdtString = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+    const pdtString = now.toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles'
+    });
     const pdt = new Date(pdtString);
     pdt.setHours(0, 0, 0, 0);
     return pdt;
   }
 
-  function today() { return getPDTDate(); }
+  function today() {
+    return getPDTDate();
+  }
+
   function getTomorrowPDT() {
     const d = getPDTDate();
     d.setDate(d.getDate() + 1);
@@ -193,7 +182,10 @@
   function getBoundary5thForCurrentCycle(baseDate) {
     const d = new Date(baseDate);
     const day = d.getDate();
-    if (day >= 6) return new Date(d.getFullYear(), d.getMonth() + 1, 5);
+
+    if (day >= 6) {
+      return new Date(d.getFullYear(), d.getMonth() + 1, 5);
+    }
     return new Date(d.getFullYear(), d.getMonth(), 5);
   }
 
@@ -207,8 +199,10 @@
     const year = d.getFullYear();
     const month = d.getMonth();
     const day = d.getDate();
+
     const startYear = day >= 6 ? year : (month === 0 ? year - 1 : year);
     const startMonth = day >= 6 ? month : (month === 0 ? 11 : month - 1);
+
     return `${startYear}-${String(startMonth + 1).padStart(2, '0')}`;
   }
 
@@ -216,7 +210,7 @@
     const day = baseDate.getDate();
     if (day >= 6 && day <= 20) return 'A';
     if (day >= 21 && day <= 26) return 'B';
-    return 'C';
+    return 'C'; // 27..end and 1..5
   }
 
   function getEarningSlab(earnings) {
@@ -230,13 +224,29 @@
     return formatYMD(transferDate) === formatYMD(getTomorrowPDT());
   }
 
-  function isEarningsPage() { return location.pathname.startsWith('/earnings'); }
-  function isPaymentSchedulePage() { return location.pathname === '/payment_schedule' || location.pathname.startsWith('/payment_schedule?'); }
-  function isSubmitPage() { return location.pathname.startsWith('/payment_schedule/submit'); }
-  function isHomePage() { return location.pathname === '/'; }
+  function isEarningsPage() {
+    return location.pathname.startsWith('/earnings');
+  }
 
-  function getEarnings() { return parseMoney(qs('.current-earnings h2')?.textContent || ''); }
-  function getTransferDate() { return parseDate(qs('.current-earnings strong')?.textContent || ''); }
+  function isPaymentSchedulePage() {
+    return location.pathname === '/payment_schedule' || location.pathname.startsWith('/payment_schedule?');
+  }
+
+  function isSubmitPage() {
+    return location.pathname.startsWith('/payment_schedule/submit');
+  }
+
+  function isHomePage() {
+    return location.pathname === '/';
+  }
+
+  function getEarnings() {
+    return parseMoney(qs('.current-earnings h2')?.textContent || '');
+  }
+
+  function getTransferDate() {
+    return parseDate(qs('.current-earnings strong')?.textContent || '');
+  }
 
   function getSelectedCycle() {
     const el = qs('input[name="disbursement_schedule_form[frequency]"]:checked');
@@ -246,6 +256,7 @@
   function setSelectedCycle(days) {
     const el = qs(`input[name="disbursement_schedule_form[frequency]"][value="${days}"]`);
     if (!el) return false;
+
     el.checked = true;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -256,6 +267,7 @@
   function selectBankAccount() {
     const bank = qs('input[name="disbursement_schedule_form[executor_type_name]"][value="GDS"]');
     if (!bank) return false;
+
     bank.checked = true;
     bank.dispatchEvent(new Event('input', { bubbles: true }));
     bank.dispatchEvent(new Event('change', { bubbles: true }));
@@ -264,37 +276,74 @@
   }
 
   function clickUpdate() {
-    if (!selectBankAccount()) return false;
-    const btn = qs('form input[type="submit"][value="Update"]') || qs('input[type="submit"][value="Update"]');
-    if (!btn) return false;
+    const bankOk = selectBankAccount();
+    if (!bankOk) {
+      log('Bank account option not found.');
+      return false;
+    }
+
+    const btn =
+      qs('form input[type="submit"][value="Update"]') ||
+      qs('input[type="submit"][value="Update"]');
+
+    if (!btn) {
+      log('Update button not found.');
+      return false;
+    }
+
     btn.click();
     return true;
   }
 
   function submitUpdateWithRetry(attempt = 1) {
-    if (!clickUpdate()) { showBanner('Could not click Update.', '#c62828'); return; }
+    const clicked = clickUpdate();
+    if (!clicked) {
+      showBanner('Could not click Update.', '#c62828');
+      return;
+    }
+
     if (attempt >= CONFIG.maxSubmitAttempts) return;
+
     setTimeout(() => {
       if (isPaymentSchedulePage()) {
-        showBanner(`Update did not submit. Retrying...`, '#ef6c00');
+        showBanner(`Update did not submit. Retrying (${attempt + 1}/${CONFIG.maxSubmitAttempts})...`, '#ef6c00');
         submitUpdateWithRetry(attempt + 1);
       }
     }, CONFIG.submitRetryDelayMs);
   }
 
+  function getConfirmButton() {
+    return (
+      qs('a[data-method="put"][href*="/payment_schedule/confirm"]') ||
+      qs('a.btn.btn-primary[href*="/payment_schedule/confirm"]') ||
+      qs('a[href*="/payment_schedule/confirm"]')
+    );
+  }
+
   function clickConfirm() {
-    const btn = qs('a[data-method="put"][href*="/payment_schedule/confirm"]') || qs('a.btn.btn-primary[href*="/payment_schedule/confirm"]');
-    if (!btn) return false;
+    const btn = getConfirmButton();
+    if (!btn) {
+      log('Confirm button not found on submit page.');
+      return false;
+    }
     btn.click();
     return true;
   }
 
   function confirmWithRetry(attempt = 1) {
-    if (!clickConfirm()) return;
+    const clicked = clickConfirm();
+    if (!clicked) {
+      if (attempt === 1) {
+        showBanner('Confirm button not found on submit page.', '#c62828');
+      }
+      return;
+    }
+
     if (attempt >= CONFIG.maxConfirmAttempts) return;
+
     setTimeout(() => {
       if (isSubmitPage()) {
-        showBanner(`Confirm failed. Retrying...`, '#ef6c00');
+        showBanner(`Confirm did not complete. Retrying (${attempt + 1}/${CONFIG.maxConfirmAttempts})...`, '#ef6c00');
         confirmWithRetry(attempt + 1);
       }
     }, CONFIG.confirmRetryDelayMs);
@@ -303,14 +352,27 @@
   function buildContext(earnings, transferDate) {
     const baseDate = today();
     return {
-      today: baseDate, todayYMD: formatYMD(baseDate), earnings, transferDate, transferDateYMD: formatYMD(transferDate),
-      isOneDayBeforeTransfer: isOneDayBeforeTransfer(transferDate), periodId: getCyclePeriodId(baseDate),
-      window: getWindow(baseDate), slab: getEarningSlab(earnings), lastDate: daysToLastDate(baseDate)
+      today: baseDate,
+      todayYMD: formatYMD(baseDate),
+      earnings,
+      transferDate,
+      transferDateYMD: formatYMD(transferDate),
+      isOneDayBeforeTransfer: isOneDayBeforeTransfer(transferDate),
+      periodId: getCyclePeriodId(baseDate),
+      window: getWindow(baseDate),
+      slab: getEarningSlab(earnings),
+      lastDate: daysToLastDate(baseDate)
     };
   }
 
   function completeSlabTrigger(ctx, ruleId, reason) {
-    saveSlabMemory({ periodId: ctx.periodId, slab: ctx.slab, ruleId, completedOn: ctx.todayYMD, reason });
+    saveSlabMemory({
+      periodId: ctx.periodId,
+      slab: ctx.slab,
+      ruleId,
+      completedOn: ctx.todayYMD,
+      reason
+    });
     clearWorkflow();
   }
 
@@ -322,53 +384,145 @@
   }
 
   function startWorkflowForRule(ctx, ruleId, targetCycle) {
-    saveWorkflow({ active: true, periodId: ctx.periodId, slab: ctx.slab, ruleId, targetCycle, step: 'START', createdOn: ctx.todayYMD });
+    saveWorkflow({
+      active: true,
+      periodId: ctx.periodId,
+      slab: ctx.slab,
+      ruleId,
+      targetCycle,
+      step: 'START',
+      createdOn: ctx.todayYMD
+    });
   }
 
   function decideRule(ctx) {
-    if (ctx.earnings >= 10 && ctx.isOneDayBeforeTransfer) return { type: 'DO_NOTHING', ruleId: RULES.R1_DO_NOTHING_10, reason: 'earnings >= 10' };
+    if (ctx.earnings >= 10 && ctx.isOneDayBeforeTransfer) {
+      return {
+        type: 'DO_NOTHING',
+        ruleId: RULES.R1_DO_NOTHING_10,
+        reason: 'earnings >= 10 and today is one day before transfer date'
+      };
+    }
+
     if (ctx.window === 'A') {
-      if (ctx.earnings < 10 && ctx.isOneDayBeforeTransfer) return { type: 'TARGET_CYCLE', ruleId: RULES.R2_FORCE_14_A, targetCycle: 14, reason: 'Window A < 10' };
+      if (ctx.earnings < 10 && ctx.isOneDayBeforeTransfer) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R2_FORCE_14_A,
+          targetCycle: 14,
+          reason: '6th to 20th, earnings < 10, one day before transfer -> target 14 days'
+        };
+      }
       return null;
     }
+
     if (ctx.window === 'B') {
-      if (ctx.earnings < 10 && ctx.isOneDayBeforeTransfer) return { type: 'TARGET_CYCLE', ruleId: RULES.R3_FORCE_7_B, targetCycle: 7, reason: 'Window B < 10' };
+      if (ctx.earnings < 10 && ctx.isOneDayBeforeTransfer) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R3_FORCE_7_B,
+          targetCycle: 7,
+          reason: '21st to 26th, earnings < 10, one day before transfer -> target 7 days'
+        };
+      }
       return null;
     }
+
     if (ctx.window === 'C') {
-      if (ctx.earnings <= 1) return { type: 'TARGET_CYCLE', ruleId: RULES.R4_FORCE_14_C_LOW, targetCycle: 14, reason: 'Window C <= 1' };
-      if (ctx.earnings > 1 && ctx.earnings <= 4 && ctx.lastDate >= 7) return { type: 'TARGET_CYCLE', ruleId: RULES.R5_FORCE_7_C_MID, targetCycle: 7, reason: 'Window C Mid' };
-      if (ctx.earnings > 1 && ctx.earnings <= 4 && ctx.lastDate > 3 && ctx.lastDate < 7) return { type: 'TARGET_CYCLE', ruleId: RULES.R5B_FORCE_3_C_MID, targetCycle: 3, reason: 'Window C Mid 3d' };
-      if (ctx.earnings >= 5 && ctx.earnings < 10 && ctx.lastDate >= 3) return { type: 'TARGET_CYCLE', ruleId: RULES.R6_FORCE_3_C_HIGH, targetCycle: 3, reason: 'Window C High' };
-      if (ctx.earnings >= 5 && ctx.earnings < 10 && ctx.lastDate < 3) return { type: 'DO_NOTHING', ruleId: RULES.R7_DO_NOTHING_C_HIGH_LATE, reason: 'Window C High Late' };
+      if (ctx.earnings <= 1) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R4_FORCE_14_C_LOW,
+          targetCycle: 14,
+          reason: '27th to 5th, earnings <= 1 -> target 14 days'
+        };
+      }
+
+      // C2a: force 7
+      if (ctx.earnings > 1 && ctx.earnings <= 4 && ctx.lastDate >= 7) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R5_FORCE_7_C_MID,
+          targetCycle: 7,
+          reason: '27th to 5th, earnings > 1 and <= 4, lastDate >= 7 -> force 7 days'
+        };
+      }
+
+      // C2b: force 3
+      if (ctx.earnings > 1 && ctx.earnings <= 4 && ctx.lastDate > 3 && ctx.lastDate < 7) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R5B_FORCE_3_C_MID,
+          targetCycle: 3,
+          reason: '27th to 5th, earnings > 1 and <= 4, lastDate between 4 and 6 -> force 3 days'
+        };
+      }
+
+      if (ctx.earnings >= 5 && ctx.earnings < 10 && ctx.lastDate >= 3) {
+        return {
+          type: 'TARGET_CYCLE',
+          ruleId: RULES.R6_FORCE_3_C_HIGH,
+          targetCycle: 3,
+          reason: '27th to 5th, earnings >= 5 and < 10, lastDate >= 3 -> target 3 days'
+        };
+      }
+
+      if (ctx.earnings >= 5 && ctx.earnings < 10 && ctx.lastDate < 3) {
+        return {
+          type: 'DO_NOTHING',
+          ruleId: RULES.R7_DO_NOTHING_C_HIGH_LATE,
+          reason: '27th to 5th, earnings >= 5 and < 10, lastDate < 3 -> do nothing'
+        };
+      }
+
       return null;
     }
+
     return null;
   }
 
   function nextCycleTargetFromWorkflow(selectedCycle, wf) {
     const target = wf.targetCycle;
+
+    // FORCE 14
     if (target === 14) {
       if (wf.step === 'START') {
-        if (selectedCycle === 14) return { nextCycle: 7, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce' };
-        return { nextCycle: 14, nextStep: 'AFTER_FINAL', note: 'set 14' };
+        if (selectedCycle === 14) {
+          return { nextCycle: 7, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce 14 -> 7' };
+        }
+        return { nextCycle: 14, nextStep: 'AFTER_FINAL', note: 'set directly to 14' };
       }
-      if (wf.step === 'AFTER_INTERMEDIATE') return { nextCycle: 14, nextStep: 'AFTER_FINAL', note: 'bounce return' };
+      if (wf.step === 'AFTER_INTERMEDIATE') {
+        return { nextCycle: 14, nextStep: 'AFTER_FINAL', note: 'bounce return 7 -> 14' };
+      }
     }
+
+    // FORCE 7
     if (target === 7) {
       if (wf.step === 'START') {
-        if (selectedCycle === 7) return { nextCycle: 3, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce' };
-        return { nextCycle: 7, nextStep: 'AFTER_FINAL', note: 'set 7' };
+        if (selectedCycle === 7) {
+          return { nextCycle: 3, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce 7 -> 3' };
+        }
+        return { nextCycle: 7, nextStep: 'AFTER_FINAL', note: 'set directly to 7' };
       }
-      if (wf.step === 'AFTER_INTERMEDIATE') return { nextCycle: 7, nextStep: 'AFTER_FINAL', note: 'bounce return' };
+      if (wf.step === 'AFTER_INTERMEDIATE') {
+        return { nextCycle: 7, nextStep: 'AFTER_FINAL', note: 'bounce return 3 -> 7' };
+      }
     }
+
+    // FORCE 3
     if (target === 3) {
       if (wf.step === 'START') {
-        if (selectedCycle === 3) return { nextCycle: 7, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce' };
-        return { nextCycle: 3, nextStep: 'AFTER_FINAL', note: 'set 3' };
+        if (selectedCycle === 3) {
+          return { nextCycle: 7, nextStep: 'AFTER_INTERMEDIATE', note: 'force bounce 3 -> 7' };
+        }
+        return { nextCycle: 3, nextStep: 'AFTER_FINAL', note: 'set directly to 3' };
       }
-      if (wf.step === 'AFTER_INTERMEDIATE') return { nextCycle: 3, nextStep: 'AFTER_FINAL', note: 'bounce return' };
+      if (wf.step === 'AFTER_INTERMEDIATE') {
+        return { nextCycle: 3, nextStep: 'AFTER_FINAL', note: 'bounce return 7 -> 3' };
+      }
     }
+
     return null;
   }
 
@@ -376,11 +530,30 @@
     const state = loadState();
     const earnings = getEarnings();
     const transferDate = getTransferDate();
-    if (!transferDate) return;
+
+    log('Earnings page', { state, earnings, transferDate });
+
+    if (!transferDate) {
+      showBanner('Could not detect transfer date.', '#c62828');
+      return;
+    }
 
     if (state && state.phase === 'VERIFY_ON_EARNINGS') {
+      const newTransferDate = getTransferDate();
+      const oldTransferDate = state.originalTransferDate
+        ? new Date(state.originalTransferDate + 'T00:00:00')
+        : null;
+
+      if (oldTransferDate && newTransferDate && formatYMD(oldTransferDate) !== formatYMD(newTransferDate)) {
+        showBanner(
+          `Verified: transfer date changed from ${formatYMD(oldTransferDate)} to ${formatYMD(newTransferDate)}.`,
+          '#2e7d32'
+        );
+      } else {
+        showBanner('Returned to earnings page after submit.', '#2e7d32');
+      }
+
       clearState();
-      showBanner('Returned to earnings page after submit.', '#2e7d32');
     }
 
     const ctx = buildContext(earnings, transferDate);
@@ -389,93 +562,180 @@
     if (wf && wf.active && wf.periodId === ctx.periodId) {
       if (wf.step === 'AFTER_FINAL') {
         completeSlabTrigger(ctx, wf.ruleId, 'workflow complete');
+        showBanner(`Completed workflow for slab ${ctx.slab}.`, '#2e7d32');
         return;
       }
-      saveState({ phase: 'OPEN_PAYMENT_SCHEDULE', workflowContinuation: true, originalTransferDate: ctx.transferDateYMD, mustReturnToEarnings: true });
-      if (CONFIG.autoOpenPaymentSchedule) { setTimeout(() => { location.href = '/payment_schedule'; }, CONFIG.redirectDelayMs); }
+
+      saveState({
+        phase: 'OPEN_PAYMENT_SCHEDULE',
+        workflowContinuation: true,
+        originalTransferDate: ctx.transferDateYMD,
+        mustReturnToEarnings: true
+      });
+
+      showBanner(`Continuing workflow: ${wf.ruleId}`, '#ef6c00');
+
+      if (CONFIG.autoOpenPaymentSchedule) {
+        setTimeout(() => {
+          location.href = '/payment_schedule';
+        }, CONFIG.redirectDelayMs);
+      }
       return;
     }
 
-    if (!shouldStartNewTrigger(ctx)) return;
+    if (!shouldStartNewTrigger(ctx)) {
+      showBanner(`No action: slab ${ctx.slab} already handled for current cycle period.`, '#6c757d');
+      return;
+    }
 
     const decision = decideRule(ctx);
-    if (!decision) return;
+
+    if (!decision) {
+      showBanner('No condition matched. No action taken.', '#6c757d');
+      return;
+    }
 
     if (decision.type === 'DO_NOTHING') {
       completeSlabTrigger(ctx, decision.ruleId, decision.reason);
+      showBanner(`Do nothing: ${decision.reason}`, '#2e7d32');
       return;
     }
 
     if (decision.type === 'TARGET_CYCLE') {
       startWorkflowForRule(ctx, decision.ruleId, decision.targetCycle);
-      saveState({ phase: 'OPEN_PAYMENT_SCHEDULE', workflowContinuation: false, originalTransferDate: ctx.transferDateYMD, mustReturnToEarnings: true });
-      showBanner(`Opening payment schedule...`, '#ef6c00');
-      if (CONFIG.autoOpenPaymentSchedule) { setTimeout(() => { location.href = '/payment_schedule'; }, CONFIG.redirectDelayMs); }
+
+      saveState({
+        phase: 'OPEN_PAYMENT_SCHEDULE',
+        workflowContinuation: false,
+        originalTransferDate: ctx.transferDateYMD,
+        mustReturnToEarnings: true
+      });
+
+      showBanner(`Opening payment schedule: ${decision.reason}`, '#ef6c00');
+
+      if (CONFIG.autoOpenPaymentSchedule) {
+        setTimeout(() => {
+          location.href = '/payment_schedule';
+        }, CONFIG.redirectDelayMs);
+      }
     }
   }
 
   function handlePaymentSchedulePage() {
     const state = loadState();
     const wf = loadWorkflow();
-    if (!state || !wf || !wf.active) return;
+
+    if (!state || !wf || !wf.active) {
+      showBanner('No active workflow. Nothing to do.', '#6c757d');
+      return;
+    }
 
     const selectedCycle = getSelectedCycle();
-    if (!selectedCycle) return;
+    if (!selectedCycle) {
+      showBanner('Could not detect selected cycle.', '#c62828');
+      return;
+    }
 
     const move = nextCycleTargetFromWorkflow(selectedCycle, wf);
-    if (!move) return;
+    if (!move) {
+      showBanner('Could not determine next workflow cycle step.', '#c62828');
+      return;
+    }
+
+    log('Workflow move', { selectedCycle, wf, move });
 
     if (move.nextCycle === selectedCycle) {
       wf.step = 'AFTER_FINAL';
       saveWorkflow(wf);
-      saveState({ ...state, phase: 'VERIFY_ON_EARNINGS', mustReturnToEarnings: true });
-      setTimeout(() => { location.href = '/earnings'; }, CONFIG.homeRedirectDelayMs);
+      showBanner(`Cycle already ${selectedCycle}. Returning to earnings...`, '#2e7d32');
+      saveState({
+        ...state,
+        phase: 'VERIFY_ON_EARNINGS',
+        mustReturnToEarnings: true
+      });
+      setTimeout(() => {
+        location.href = '/earnings';
+      }, CONFIG.homeRedirectDelayMs);
       return;
     }
 
-    if (!setSelectedCycle(move.nextCycle)) return;
+    const ok = setSelectedCycle(move.nextCycle);
+    if (!ok) {
+      showBanner(`Failed to change cycle from ${selectedCycle} to ${move.nextCycle}.`, '#c62828');
+      return;
+    }
 
     wf.step = move.nextStep;
+    wf.lastMove = {
+      from: selectedCycle,
+      to: move.nextCycle,
+      note: move.note,
+      on: formatYMD(today())
+    };
     saveWorkflow(wf);
-    saveState({ ...state, phase: 'SUBMITTED', previousCycle: selectedCycle, nextCycle: move.nextCycle, mustReturnToEarnings: true });
-    
-    showBanner(`Changing cycle and submitting...`, '#1565c0');
-    if (CONFIG.autoClickUpdate) { setTimeout(() => { submitUpdateWithRetry(1); }, CONFIG.submitDelayMs); }
+
+    showBanner(`Changing cycle ${selectedCycle} → ${move.nextCycle} and submitting...`, '#1565c0');
+
+    saveState({
+      ...state,
+      phase: 'SUBMITTED',
+      previousCycle: selectedCycle,
+      nextCycle: move.nextCycle,
+      mustReturnToEarnings: true
+    });
+
+    if (CONFIG.autoClickUpdate) {
+      setTimeout(() => {
+        submitUpdateWithRetry(1);
+      }, CONFIG.submitDelayMs);
+    }
   }
 
   function handleSubmitPage() {
     const state = loadState();
-    if (!state) return;
-    saveState({ ...state, phase: 'VERIFY_ON_EARNINGS', mustReturnToEarnings: true });
-    showBanner('Clicking Confirm...', '#1565c0');
-    setTimeout(() => { confirmWithRetry(1); }, CONFIG.confirmDelayMs);
-    setTimeout(() => { location.href = '/earnings'; }, CONFIG.afterSubmitDelayMs);
+    if (!state) {
+      showBanner('Submit page reached, but no saved state found.', '#6c757d');
+      return;
+    }
+
+    saveState({
+      ...state,
+      phase: 'VERIFY_ON_EARNINGS',
+      mustReturnToEarnings: true
+    });
+
+    showBanner('Submit page reached. Clicking Confirm...', '#1565c0');
+
+    setTimeout(() => {
+      confirmWithRetry(1);
+    }, CONFIG.confirmDelayMs);
+
+    setTimeout(() => {
+      showBanner('Redirecting to earnings for verification...', '#1565c0');
+      location.href = '/earnings';
+    }, CONFIG.afterSubmitDelayMs);
   }
 
   function handleHomePage() {
     const state = loadState();
+    log('Home page reached', state);
+
     if (!state) return;
-    if (state.phase === 'SUBMITTED' || state.phase === 'VERIFY_ON_EARNINGS' || state.mustReturnToEarnings) {
-      setTimeout(() => { location.href = '/earnings'; }, CONFIG.homeRedirectDelayMs);
+
+    if (
+      state.phase === 'SUBMITTED' ||
+      state.phase === 'VERIFY_ON_EARNINGS' ||
+      state.mustReturnToEarnings
+    ) {
+      showBanner('Home page reached after submit. Redirecting to earnings...', '#1565c0');
+      setTimeout(() => {
+        location.href = '/earnings';
+      }, CONFIG.homeRedirectDelayMs);
     }
   }
 
-  async function init() {
+  function init() {
     try {
-      showBanner('Verifying security...', '#57606a');
-      const [authorizedIds, myId] = await Promise.all([getAuthorizedIds(), getMyWorkerId()]);
-
-      if (!myId || !authorizedIds.includes(myId)) {
-        showLockScreen();
-        return;
-      }
-
-      showBanner('Security Verified.', '#2e7d32');
-      setTimeout(() => {
-        const el = document.getElementById('nmshn-cycle-banner');
-        if (el) el.style.display = 'none';
-      }, 2000);
-
       if (isEarningsPage()) {
         handleEarningsPage();
       } else if (isPaymentSchedulePage()) {
@@ -486,7 +746,8 @@
         handleHomePage();
       }
     } catch (err) {
-      console.error('[N*M*S*H*N] Init error:', err);
+      console.error('[N*M*S*H*N] Script error:', err);
+      showBanner(`Script error: ${err.message}`, '#c62828');
     }
   }
 
